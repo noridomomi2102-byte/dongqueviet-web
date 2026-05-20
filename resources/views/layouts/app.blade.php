@@ -526,13 +526,19 @@
         }
         .grid { display: grid; gap: 1.5rem; }
         .grid-3 { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
-        .pagination { margin-top: 2rem; display: flex; justify-content: center; gap: .5rem; flex-wrap: wrap; }
+        .pagination { margin-top: 2rem; display: flex; justify-content: center; align-items: center; gap: .5rem; flex-wrap: wrap; }
         .pagination a, .pagination span {
+            display: inline-block;
             padding: .5rem .85rem;
             border: 1px solid var(--border);
             border-radius: 4px;
+            font-size: .9rem;
+            line-height: 1.2;
+            text-decoration: none;
+            color: inherit;
         }
-        .pagination .active span { background: var(--cand-red); color: #fff; border-color: var(--cand-red); }
+        .pagination span.active { background: var(--cand-red); color: #fff; border-color: var(--cand-red); font-weight: 600; }
+        .pagination span.disabled { opacity: .45; cursor: default; }
         h1 { font-size: 1.75rem; margin: 0 0 1rem; line-height: 1.3; }
         .page-title { margin-bottom: 1.5rem; padding-bottom: .75rem; border-bottom: 3px solid var(--cand-red); }
         a:hover { color: var(--cand-red); }
