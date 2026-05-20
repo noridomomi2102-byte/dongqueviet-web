@@ -513,13 +513,9 @@ class ExternalNewsCrawler
             $content = '<div class="article-sapo"><p>'.e($excerpt).'</p></div>'.$content;
         }
 
-        $imageUrl = $this->metaContent($xpath, 'og:image');
-        if ($imageUrl === '' || str_contains($imageUrl, 'logo')) {
-            $imageUrl = $this->firstRealImageInHtml($content);
-        }
+        $imageUrl = $this->pickTapchiFeaturedImage($xpath, $url, $content);
 
-        $dateText = $this->nodeText($xpath, "//div[contains(@class,'publishdate')]")
-            ?: $this->nodeText($xpath, "//div[contains(@class,'publishdate')]");
+        $dateText = $this->nodeText($xpath, "//div[contains(@class,'publishdate')]");
 
         return [
             'title' => html_entity_decode(trim($title), ENT_QUOTES | ENT_HTML5, 'UTF-8'),
@@ -530,6 +526,90 @@ class ExternalNewsCrawler
             'source_note' => '<p class="article-source" style="margin-top:1.5rem;font-size:.9rem;color:#666"><em>'
                 .'Nguồn: <a href="'.e($url).'" target="_blank" rel="nofollow noopener">tapchicongsan.org.vn</a></em></p>',
         ];
+    }
+
+    protected function pickTapchiFeaturedImage(\DOMXPath $xpath, string $articleUrl, string $contentHtml): string
+    {
+        foreach ($xpath->query("//meta[@property='og:image']") as $meta) {
+            if (! $meta instanceof \DOMElement) {
+                continue;
+            }
+            $candidate = $this->resolveAbsoluteUrl($meta->getAttribute('content'), $articleUrl);
+            if ($candidate !== '' && $this->isTapchiArticleImageUrl($candidate)) {
+                return $candidate;
+            }
+        }
+
+        foreach ($xpath->query("//div[contains(@class,'journal-content-article')]//img") as $img) {
+            if (! $img instanceof \DOMElement) {
+                continue;
+            }
+            $candidate = $this->resolveAbsoluteUrl($img->getAttribute('src'), $articleUrl);
+            if ($candidate !== '' && $this->isTapchiArticleImageUrl($candidate)) {
+                return $candidate;
+            }
+        }
+
+        return $this->firstRealImageInHtml($contentHtml, $articleUrl);
+    }
+
+    protected function isTapchiArticleImageUrl(string $url): bool
+    {
+        if ($url === '') {
+            return false;
+        }
+
+        if (str_contains($url, '/image/journal/article')) {
+            return true;
+        }
+
+        return ! $this->isDecorativeImageUrl($url);
+    }
+
+    protected function isDecorativeImageUrl(string $url): bool
+    {
+        $lower = strtolower($url);
+
+        return str_contains($lower, 'logo')
+            || str_contains($lower, '/tapchicongsan-theme/')
+            || str_contains($lower, 'social_bookmark')
+            || str_contains($lower, 'icon-fb')
+            || str_contains($lower, 'icon-twister')
+            || str_contains($lower, 'icon-zalo')
+            || str_contains($lower, 'icon-print')
+            || str_contains($lower, 'arr-down')
+            || str_contains($lower, 'search2.png')
+            || str_contains($lower, 'favicon');
+    }
+
+    protected function resolveAbsoluteUrl(string $url, string $baseUrl): string
+    {
+        $url = html_entity_decode(trim($url), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $url = str_replace('&amp;', '&', $url);
+
+        if ($url === '' || str_starts_with($url, 'data:')) {
+            return '';
+        }
+
+        if (str_starts_with($url, '//')) {
+            return 'https:'.$url;
+        }
+
+        if (str_starts_with($url, 'http')) {
+            return $url;
+        }
+
+        $parts = parse_url($baseUrl);
+        $origin = ($parts['scheme'] ?? 'https').'://'.($parts['host'] ?? '');
+
+        if (str_starts_with($url, '/')) {
+            return $origin.$url;
+        }
+
+        $path = $parts['path'] ?? '/';
+        $dir = preg_replace('#/[^/]*$#', '/', $path) ?: '/';
+
+        return $origin.$dir.ltrim($url, '/');
     }
 
     protected function parseTapchiDate(?string $value): ?Carbon
@@ -859,50 +939,43 @@ class ExternalNewsCrawler
     {
         return preg_replace_callback('/<img\b[^>]*>/i', function (array $m) use ($articleUrl, $folder) {
             $tag = $m[0];
-            $realUrl = $this->resolveImageUrlFromTag($tag);
+            $realUrl = $this->resolveImageUrlFromTag($tag, $articleUrl);
 
-            if (! $realUrl) {
+            if (! $realUrl || $this->isDecorativeImageUrl($realUrl)) {
                 return '';
             }
 
-            $local = $this->downloadImage($realUrl, $articleUrl, $folder);
-            if (! $local) {
-                return '';
-            }
-
-            $publicUrl = '/storage/'.$local;
             $alt = '';
             if (preg_match('/\balt=["\']([^"\']*)["\']/i', $tag, $a)) {
                 $alt = $a[1];
             }
 
-            return '<figure class="article-figure"><img src="'.e($publicUrl).'" alt="'.e($alt).'" loading="lazy"></figure>';
+            $local = $this->downloadImage($realUrl, $articleUrl, $folder);
+            $src = $local ? '/storage/'.$local : $realUrl;
+
+            return '<figure class="article-figure"><img src="'.e($src).'" alt="'.e($alt).'" loading="lazy"></figure>';
         }, $html) ?? $html;
     }
 
-    protected function resolveImageUrlFromTag(string $imgTag): ?string
+    protected function resolveImageUrlFromTag(string $imgTag, string $baseUrl = ''): ?string
     {
         foreach (['data-src', 'data-original', 'src'] as $attr) {
             if (preg_match('/\b'.preg_quote($attr, '/').'=["\']([^"\']+)["\']/i', $imgTag, $m)) {
-                $url = html_entity_decode($m[1], ENT_QUOTES | ENT_HTML5, 'UTF-8');
-                if ($url && str_starts_with($url, 'http')) {
-                    return $url;
-                }
-                if ($url && str_starts_with($url, '//')) {
-                    return 'https:'.$url;
-                }
+                $url = $this->resolveAbsoluteUrl($m[1], $baseUrl);
+
+                return $url !== '' ? $url : null;
             }
         }
 
         return null;
     }
 
-    protected function firstRealImageInHtml(string $html): string
+    protected function firstRealImageInHtml(string $html, string $baseUrl = ''): string
     {
         if (preg_match_all('/<img\b[^>]+>/i', $html, $matches)) {
             foreach ($matches[0] as $tag) {
-                $url = $this->resolveImageUrlFromTag($tag);
-                if ($url) {
+                $url = $this->resolveImageUrlFromTag($tag, $baseUrl);
+                if ($url && ! $this->isDecorativeImageUrl($url)) {
                     return $url;
                 }
             }
