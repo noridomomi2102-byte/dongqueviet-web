@@ -8,14 +8,14 @@ use Illuminate\Console\Command;
 class CrawlExternalNewsCommand extends Command
 {
     protected $signature = 'news:crawl
-                            {category : Slug chuyên mục (tin-gia, phap-luat, doi-song)}
+                            {category : Slug chuyên mục (tin-gia, phap-luat, doi-song, dau-tranh-phan-bac)}
                             {--limit=50 : Số bài tối đa}
                             {--force : Cập nhật lại bài đã crawl}
                             {--month=5 : Lọc bài theo tháng (1-12)}
                             {--year=2026 : Lọc bài theo năm}
                             {--no-fallback : Không lấy bài mới nhất khi tingia không có bài đúng tháng}';
 
-    protected $description = 'Crawl tin từ tingia.gov.vn và dantri.com.vn theo chuyên mục';
+    protected $description = 'Crawl tin từ tingia, dantri, tapchicongsan.org.vn theo chuyên mục';
 
     public function handle(ExternalNewsCrawler $crawler): int
     {
@@ -32,6 +32,7 @@ class CrawlExternalNewsCommand extends Command
             'tin-gia' => 'tingia.gov.vn/linh-vuc',
             'phap-luat' => 'dantri.com.vn/phap-luat',
             'doi-song' => 'dantri.com.vn/doi-song',
+            'dau-tranh-phan-bac' => 'tapchicongsan.org.vn/dau-tranh-phan-bac',
         ];
 
         if (! isset($sources[$slug])) {
@@ -42,6 +43,11 @@ class CrawlExternalNewsCommand extends Command
 
         if ($slug === 'tin-gia') {
             $this->info('Tin giả: lấy tối đa '.$limit.' bài mới nhất từ tingia.gov.vn (mọi tháng).');
+        } elseif ($slug === 'dau-tranh-phan-bac') {
+            $this->info('Đấu tranh phản bác: crawl toàn bộ danh sách từ tapchicongsan.org.vn (~145 bài, có thể vài phút)...');
+            if ($limit === 50) {
+                $limit = 0;
+            }
         } else {
             $this->info("Đang crawl {$slug} (tháng {$month}/{$year}, tối đa {$limit} bài)...");
         }
@@ -53,7 +59,7 @@ class CrawlExternalNewsCommand extends Command
                 $force,
                 $month,
                 $year,
-                $slug === 'tin-gia' || ! $this->option('no-fallback'),
+                in_array($slug, ['tin-gia', 'dau-tranh-phan-bac'], true) || ! $this->option('no-fallback'),
             );
         } catch (\Throwable $e) {
             $this->error($e->getMessage());

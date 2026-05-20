@@ -38,6 +38,12 @@ class ExternalNewsCrawler
             'driver' => 'dantri_rss',
             'rss' => 'https://dantri.com.vn/rss/doi-song.rss',
         ],
+        'dau-tranh-phan-bac' => [
+            'driver' => 'tapchi_cong_san',
+            'list_url' => 'https://www.tapchicongsan.org.vn/dau-tranh-phan-bac-cac-luan-dieu-sai-trai-thu-dich',
+            'latest_only' => true,
+            'default_limit' => 0,
+        ],
     ];
 
     protected const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (compatible; TinTucBot/1.0)';
@@ -77,6 +83,9 @@ class ExternalNewsCrawler
             $tingiaResult = $this->fetchTingiaItems($config, $limit, $latestOnly ? null : $month, $latestOnly ? null : $year);
             $items = $tingiaResult['items'];
             $relaxMonthFilter = $latestOnly || $tingiaResult['fallback'];
+        } elseif ($config['driver'] === 'tapchi_cong_san') {
+            $items = $this->fetchTapchiCongSanItems($config, $limit);
+            $relaxMonthFilter = true;
         } else {
             $items = match ($config['driver']) {
                 'dantri_rss' => $this->fetchDantriRssItems($config['rss'], $limit, $month, $year),
@@ -96,9 +105,11 @@ class ExternalNewsCrawler
             }
 
             try {
-                $article = $config['driver'] === 'tingia'
-                    ? $this->fetchTingiaArticle($sourceUrl)
-                    : $this->fetchDantriArticle($sourceUrl);
+                $article = match ($config['driver']) {
+                    'tingia' => $this->fetchTingiaArticle($sourceUrl),
+                    'tapchi_cong_san' => $this->fetchTapchiCongSanArticle($sourceUrl),
+                    default => $this->fetchDantriArticle($sourceUrl),
+                };
 
                 $publishedAt = $article['published_at'] ?? $item['published_at'] ?? null;
                 if (! $relaxMonthFilter && $publishedAt && ($publishedAt->month !== $month || $publishedAt->year !== $year)) {
@@ -394,6 +405,172 @@ class ExternalNewsCrawler
     }
 
     /** @return array{title: string, excerpt: string, content: string, featured_image: ?string, published_at: ?Carbon, source_note: string} */
+    /**
+     * @param  array{list_url: string}  $config
+     * @return list<array{url: string, title: string, published_at?: ?Carbon}>
+     */
+    protected function fetchTapchiCongSanItems(array $config, int $limit): array
+    {
+        $listUrl = $config['list_url'];
+        $html = $this->httpGet($listUrl);
+        $maxPage = $this->detectTapchiMaxPage($html);
+        $pageTemplate = $this->extractTapchiPageTemplate($html);
+
+        $items = [];
+
+        for ($page = 1; $page <= $maxPage; $page++) {
+            if ($page > 1) {
+                $pageUrl = $pageTemplate
+                    ? str_replace('__PAGE__', (string) $page, $pageTemplate)
+                    : $listUrl;
+                $html = $this->httpGet($pageUrl);
+            }
+
+            foreach ($this->extractTapchiArticleLinks($html) as $item) {
+                $items[$item['url']] = $item;
+            }
+
+            if ($limit > 0 && count($items) >= $limit) {
+                break;
+            }
+
+            if ($page < $maxPage) {
+                usleep($this->delayMs * 1000);
+            }
+        }
+
+        $list = array_values($items);
+
+        return $limit > 0 ? array_slice($list, 0, $limit) : $list;
+    }
+
+    protected function detectTapchiMaxPage(string $html): int
+    {
+        if (preg_match_all('#_101_INSTANCE_YqSB2JpnYto9_cur=(\d+)#', $html, $matches)) {
+            return max(array_map('intval', $matches[1]));
+        }
+
+        return 1;
+    }
+
+    protected function extractTapchiPageTemplate(string $html): ?string
+    {
+        if (! preg_match('#href="([^"]*_101_INSTANCE_YqSB2JpnYto9_cur=2[^"]*)"#', $html, $match)) {
+            return null;
+        }
+
+        $url = html_entity_decode($match[1], ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $url = str_replace('&amp;', '&', $url);
+
+        return preg_replace('#_cur=\d+#', '_cur=__PAGE__', $url) ?: null;
+    }
+
+    /** @return list<array{url: string, title: string}> */
+    protected function extractTapchiArticleLinks(string $html): array
+    {
+        $links = [];
+
+        $pattern = '#https://www\.tapchicongsan\.org\.vn/web/guest/dau-tranh-phan-bac-cac-luan-dieu-sai-trai-thu-dich/chi-tiet/-/asset_publisher/[^/]+/content/[a-z0-9\-]+#i';
+
+        if (preg_match_all($pattern, $html, $matches)) {
+            foreach (array_unique($matches[0]) as $url) {
+                $links[$url] = ['url' => $url, 'title' => ''];
+            }
+        }
+
+        return array_values($links);
+    }
+
+    /** @return array{title: string, excerpt: string, content: string, featured_image: ?string, published_at: ?Carbon, source_note: string} */
+    protected function fetchTapchiCongSanArticle(string $url): array
+    {
+        $html = $this->httpGet($url);
+        $xpath = $this->domXPath($html);
+
+        $title = $this->nodeText($xpath, "//div[contains(@class,'journal-content-article')]//h2");
+        if ($title === '') {
+            $title = $this->metaContent($xpath, 'og:title');
+        }
+        $title = preg_replace('/\s*-\s*Tạp chí Cộng sản\s*$/iu', '', $title) ?? $title;
+
+        $excerpt = $this->metaContent($xpath, 'og:description');
+        $excerpt = preg_replace('/^TCCS\s*[-–—]\s*/iu', '', $excerpt) ?? $excerpt;
+
+        $contentNode = $xpath->query("//div[contains(@class,'journal-content-article')]")->item(0);
+
+        $content = '';
+        if ($contentNode instanceof \DOMElement) {
+            $this->removeTapchiUnwanted($xpath, $contentNode);
+            $content = $this->cleanContentHtml($this->innerHtml($contentNode));
+            $content = $this->processImagesInHtml($content, $url, 'tapchi');
+        }
+
+        if ($content === '') {
+            throw new \RuntimeException('Không tìm thấy nội dung bài viết Tạp chí Cộng sản.');
+        }
+
+        if ($excerpt !== '') {
+            $content = '<div class="article-sapo"><p>'.e($excerpt).'</p></div>'.$content;
+        }
+
+        $imageUrl = $this->metaContent($xpath, 'og:image');
+        if ($imageUrl === '' || str_contains($imageUrl, 'logo')) {
+            $imageUrl = $this->firstRealImageInHtml($content);
+        }
+
+        $dateText = $this->nodeText($xpath, "//div[contains(@class,'publishdate')]")
+            ?: $this->nodeText($xpath, "//div[contains(@class,'publishdate')]");
+
+        return [
+            'title' => html_entity_decode(trim($title), ENT_QUOTES | ENT_HTML5, 'UTF-8'),
+            'excerpt' => html_entity_decode(Str::limit(strip_tags($excerpt), 500, ''), ENT_QUOTES | ENT_HTML5, 'UTF-8'),
+            'content' => $content,
+            'featured_image' => $imageUrl ? $this->downloadImage($imageUrl, $url, 'tapchi') : null,
+            'published_at' => $this->parseTapchiDate($dateText),
+            'source_note' => '<p class="article-source" style="margin-top:1.5rem;font-size:.9rem;color:#666"><em>'
+                .'Nguồn: <a href="'.e($url).'" target="_blank" rel="nofollow noopener">tapchicongsan.org.vn</a></em></p>',
+        ];
+    }
+
+    protected function parseTapchiDate(?string $value): ?Carbon
+    {
+        if (! $value) {
+            return null;
+        }
+
+        if (preg_match('#(\d{1,2}):(\d{2}),\s*ngày\s*(\d{1,2})-(\d{1,2})-(\d{4})#ui', $value, $m)) {
+            try {
+                return Carbon::create((int) $m[5], (int) $m[4], (int) $m[3], (int) $m[1], (int) $m[2], 0, config('app.timezone'));
+            } catch (\Throwable) {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    protected function removeTapchiUnwanted(\DOMXPath $xpath, \DOMNode $context): void
+    {
+        foreach ([
+            './/style',
+            './/script',
+            './/h2',
+            './/*[contains(@class,"publishdate")]',
+        ] as $query) {
+            $nodes = $xpath->query($query, $context);
+            if (! $nodes) {
+                continue;
+            }
+            $remove = [];
+            foreach ($nodes as $node) {
+                $remove[] = $node;
+            }
+            foreach ($remove as $node) {
+                $node->parentNode?->removeChild($node);
+            }
+        }
+    }
+
     protected function fetchDantriArticle(string $url): array
     {
         $html = $this->httpGet($url);
